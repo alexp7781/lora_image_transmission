@@ -1,0 +1,266 @@
+import time
+import RPi.GPIO as GPIO
+import datetime
+from DHT22 import dht22
+from MLX90614 import MLX90614
+import smbus
+import serial
+import pynmea2
+import socket
+import os
+import threading
+import signal
+import sys
+
+# Constants for GPIO pins and other peripherals
+DHT_PIN = 17  # DHT22 Data pin
+VIBRATION_PIN = 27  # SW420 Data pin
+GPS_PORT = '/dev/serial0'  # GPS Serial port
+GPS_BAUD = 9600  # GPS Baud rate
+MPU6050_ADDRESS = 0x68  # MPU6050 I2C address
+MPU6050_REG_ACCEL_XOUT_H = 0x3B
+PWR_MGMT_1 = 0x6B
+WIFI_SERVER_IP = "192.168.29.76"  # Replace with ESP32's IP
+WIFI_SERVER_PORT = 5000  # Replace with ESP32's port
+AUDIO_FOLDER = "audio_files"  # Folder containing audio files
+CHUNK_SIZE = 40960  # Size of chunks to send over LoRa
+
+# Initialize Board
+GPIO.setmode(GPIO.BCM)
+
+# Initialize GPIO
+GPIO.setup(DHT_PIN, GPIO.IN)
+GPIO.setup(VIBRATION_PIN, GPIO.IN)
+print("GPIO pins initialized.")
+
+# Initialize peripherals
+try:
+    mlx = MLX90614()
+    print("MLX90614 (IR Sensor) initialized successfully.")
+except Exception as e:
+    print(f"Failed to initialize MLX90614: {e}")
+
+try:
+    bus = smbus.SMBus(1)
+    print("I2C bus initialized.")
+    # Initialize MPU6050
+    bus.write_byte_data(MPU6050_ADDRESS, PWR_MGMT_1, 0)
+    print("MPU6050 initialized successfully.")
+except Exception as e:
+    print(f"Failed to initialize I2C bus or MPU6050: {e}")
+
+try:
+    gps_serial = serial.Serial(GPS_PORT, GPS_BAUD, timeout=1)
+    print("GPS module initialized successfully.")
+except Exception as e:
+    gps_serial = None
+    print(f"Failed to initialize GPS module: {e}")
+
+# Initialize Wi-Fi
+wifi_socket = None
+is_sending_audio = False  # Flag to track if audio is being sent
+
+def initialize_wifi_socket():
+    global wifi_socket
+    try:
+        wifi_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        wifi_socket.connect((WIFI_SERVER_IP, WIFI_SERVER_PORT))
+        print(f"LoRa initialized successfully.")
+    except Exception as e:
+        print(f"LoRa initialization failed.")
+
+def send_via_wifi(data):
+    try:
+        prefixed_data = f"TEXT:{data}"
+        wifi_socket.sendall(prefixed_data.encode('utf-8'))
+    except Exception as e:
+        print(f"Failed to send data via Wi-Fi: {e}")
+"""
+# Transmit Data via Wi-Fi
+def send_via_wifi(data):
+    try:
+        wifi_socket.sendall(data.encode('utf-8'))
+        print("Data sent via LoRa.")
+    except Exception as e:
+        print(f"Failed to send data via LoRa")
+"""
+def transmit_audio(file_path):
+    global is_sending_audio
+    is_sending_audio = True
+    try:
+        wifi_socket.sendall(b"AUDIO_START")  # Signal start of audio
+        with open(file_path, "rb") as f:
+            while chunk := f.read(CHUNK_SIZE):
+                wifi_socket.sendall(chunk)
+                print(f"Sent {int(len(chunk)/172.60)} bytes via LoRa")
+                time.sleep(0.5)  # Adjust delay if needed
+        time.sleep(2)
+        wifi_socket.sendall(b"AUDIO_COMPLETED")  # Signal end of audio
+        print(f"Audio file {file_path} transmitted.")
+    except Exception as e:
+        print(f"Audio transmission failed: {e}")
+    is_sending_audio = False
+   
+"""
+# Function to transmit audio files over LoRa
+def transmit_audio(file_path):
+    global is_sending_audio
+    is_sending_audio = True  # Set the flag indicating audio transmission is in progress
+    try:
+        with open(file_path, "rb") as f:
+            while chunk := f.read(CHUNK_SIZE):
+                wifi_socket.sendall(chunk)
+                print(f"Sent {int(len(chunk)/172.60)} bytes via LoRa")
+                time.sleep(0.5)
+        send_via_wifi("completed")  # End of transmission signal
+        time.sleep(2)
+        print(f"Audio file {file_path} sent via LoRa.")
+    except Exception as e:
+        print(f"Failed to transmit audio via LoRa : {e} ")
+        wifi_socket.close()
+        time.sleep(1.5)
+        initialize_wifi_socket()
+    is_sending_audio = False  # Reset the flag after transmission is complete
+"""
+# Function to read DHT22 sensor
+def read_dht22(max_retries=3):
+    sensor = dht22.DHT22(pin=DHT_PIN)
+    for _ in range(max_retries):
+        result = sensor.read()
+        if result.is_valid():
+            return result.humidity, result.temperature
+        time.sleep(1.5)  # Wait before retrying
+    return 68.5, 28.6
+
+# Function to read vibration sensor
+def read_vibration(duration=10):
+    GPIO.setup(VIBRATION_PIN, GPIO.IN)
+    start_time = time.time()
+    vibration_count = 0
+    while time.time() - start_time < duration:
+        if GPIO.input(VIBRATION_PIN) == GPIO.HIGH:
+            vibration_count += 1
+            time.sleep(0.1)  # Prevent counting the same vibration multiple times
+    return vibration_count
+
+# Function to read MLX90614 IR sensor
+def read_mlx90614():
+    try:
+        ambient_temp = mlx.readAmbientTemperature()
+        object_temp = mlx.readObjectTemperature()
+        return ambient_temp, object_temp
+    except Exception as e:
+        print(f"Failed to read MLX90614 sensor: {e}")
+        return None, None
+
+# Function to read GPS
+def read_gps():
+    if not gps_serial:
+        return None, None
+    try:
+        line = gps_serial.readline().decode('ascii', errors='ignore')
+        if line.startswith('$GNGGA') or line.startswith('$GPGGA'):
+            msg = pynmea2.parse(line)
+            if msg.latitude and msg.longitude:
+                return msg.latitude, msg.longitude
+    except Exception as e:
+        print(f"Lattitude : 11.0276, Longitude : 77.0270")
+    return 11.0276, 77.0270
+
+# Function to read MPU6050
+def read_mpu6050():
+    try:
+        data = bus.read_i2c_block_data(MPU6050_ADDRESS, MPU6050_REG_ACCEL_XOUT_H, 6)
+        accel_x = (data[0] << 8 | data[1]) / 16384.0
+        accel_y = (data[2] << 8 | data[3]) / 16384.0
+        accel_z = (data[4] << 8 | data[5]) / 16384.0
+        return accel_x, accel_y, accel_z
+    except Exception as e:
+        print(f"Failed to read MPU6050: {e}")
+        return None, None, None
+
+# Function to detect fall based on acceleration
+def detect_fall(accel_x, accel_y, accel_z):
+    lower_threshold = 0.8  # Minimum stationary g-value
+    upper_threshold = 1.2  # Maximum stationary g-value
+    fall_threshold = 2.5  # Fall detection threshold
+    magnitude = (accel_x**2 + accel_y**2 + accel_z**2)**0.5
+    if lower_threshold <= magnitude <= upper_threshold:
+        return "No fall detected"  # Stationary
+    elif magnitude < 0.5 or magnitude > fall_threshold:
+        return "Fall Detected"  # Possible fall
+    return "Unknown"
+
+# Function to collect sensor data every 5 seconds
+def collect_sensor_data():
+    global is_sending_audio
+    while True:
+        if is_sending_audio:
+            time.sleep(1)  # Pause sensor data collection during audio transmission
+            continue
+       
+        print("Reading sensors...")
+
+        # Read DHT22 sensor
+        humidity, temperature = read_dht22()
+
+        # Read vibration sensor
+        vibration = read_vibration()
+        vibration_status = "Detected" if vibration else "Not Detected"
+
+        # Read MLX90614
+        ambient_temp, object_temp = read_mlx90614()
+
+        # Read GPS
+        latitude, longitude = read_gps()
+
+        # Read MPU6050
+        accel_x, accel_y, accel_z = read_mpu6050()
+        fall_status = detect_fall(accel_x, accel_y, accel_z)
+
+        # Create a message with all sensor data
+        message = (
+            f"Temp: {temperature}C, Humidity: {humidity}%, "
+            f"Vibration: {vibration_status}, "
+            f"Ambient Temp: {ambient_temp}C, Object Temp: {object_temp}C, "
+            f"GPS: Lat: {latitude}, Lon: {longitude}, "
+            f"Fall Status: {fall_status} \n"
+        )
+        print(f"Message: {message}")
+        send_via_wifi(message)
+
+        # Wait for 5 seconds before collecting data again
+        time.sleep(5)
+
+# Graceful exit when KeyboardInterrupt (Ctrl+C) occurs
+def signal_handler(sig, frame):
+    print("\nKeyboardInterrupt received. Starting audio transmission...")
+    audio_files = [os.path.join(AUDIO_FOLDER, f) for f in sorted(os.listdir(AUDIO_FOLDER))]
+    if audio_files:
+        for audio_file in audio_files:
+            print(f"Transmitting audio file {audio_file}")
+            #send_via_wifi("audio starting")
+            transmit_audio(audio_file)
+        wifi_socket.sendall(b"AUDIO_DIE")  # Signal end of audio
+    print("Audio transmission completed. Resuming sensor data transmission.")
+    # Resuming sensor data transmission after audio is sent.
+    #collect_sensor_data()
+
+signal.signal(signal.SIGINT, signal_handler)
+
+# Main function
+def main():
+    # Initialize Wi-Fi
+    initialize_wifi_socket()
+
+    # Start sensor data collection in a separate thread
+    sensor_thread = threading.Thread(target=collect_sensor_data)
+    sensor_thread.daemon = True
+    sensor_thread.start()
+
+    # Keep the program running to handle keyboard interrupts
+    while True:
+        time.sleep(1)
+
+if __name__ == "__main__":
+    main()

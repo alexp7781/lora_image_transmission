@@ -1,0 +1,240 @@
+import time
+import os
+import socket
+import pygame
+import RPi.GPIO as GPIO
+import spidev  # Use spidev for SPI communication
+from ST7735 import ST7735
+
+# Constants for Wi-Fi
+WIFI_SERVER_IP = "192.168.29.76"  # Replace with your server's IP
+WIFI_SERVER_PORT = 5000  # Replace with your server's port
+AUDIO_FOLDER = "received_audio_files"  # Folder to save received audio
+CHUNK_SIZE = 40960  # Chunk size for audio data (for large audio packets)
+SENSOR_THRESHOLD_SIZE = 250  # Threshold size to differentiate sensor data from audio
+
+# Define your SPI and pin constants
+SPI_BUS = 0  # SPI bus number (usually 0 or 1)
+SPI_CS = 0   # Chip select pin (can be 0 or 1 depending on your setup)
+SPI_SPEED_HZ = 4000000  # SPI speed (in Hz)
+TFT_CS_PIN = 8  # Chip Select pin for the TFT display
+TFT_DC_PIN = 24  # Data/Command pin for the TFT display
+TFT_RST_PIN = 25  # Reset pin (optional, can be None)
+TFT_WIDTH = 128  # Display width
+TFT_HEIGHT = 128  # Display height
+
+# Initialize the SPI interface
+spi = spidev.SpiDev()
+spi.open(SPI_BUS, SPI_CS)  # Open the SPI bus and chip select
+spi.max_speed_hz = SPI_SPEED_HZ  # Set SPI speed
+spi.mode = 0  # SPI mode (change if necessary, depending on your display's requirements)
+
+# Initialize the ST7735 display
+tft = ST7735(
+    port=spi,                        # Pass SPI interface (port)
+    cs=TFT_CS_PIN,                   # Chip select pin
+    dc=TFT_DC_PIN,                   # Data/command pin
+    rst=TFT_RST_PIN,                 # Reset pin (optional)
+    width=TFT_WIDTH,                 # Width of the display
+    height=TFT_HEIGHT,               # Height of the display
+    spi_speed_hz=SPI_SPEED_HZ        # SPI speed
+)
+
+#tft.text(10,10,"Hello",colour=0x0000)
+tft.send([ord(c) for c in "Hello"], is_data=True)
+
+# Initialize pygame for audio playback
+pygame.mixer.init()
+"""
+# Wi-Fi Receiver Function
+def receive_via_wifi():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((WIFI_SERVER_IP, WIFI_SERVER_PORT))
+            sock.listen(1)
+            print(f"Listening for LoRa messages on {WIFI_SERVER_IP}:{WIFI_SERVER_PORT}...")
+            conn, addr = sock.accept()
+            with conn:
+                print(f"Connected by {addr}")
+               
+                while True:
+                    # Set a timeout for the socket to prevent blocking indefinitely
+                    conn.settimeout(5)  # Timeout after 10 seconds if no data is received
+                    try:
+                        data = conn.recv(1024)
+                        if not data:
+                            break
+
+                        # Check the size of the received data
+                        if (data == "audio starting"):
+                            # It is likely audio data
+                            receive_audio_file(conn)
+                        else:
+                            # It is sensor data
+                            message = data.decode('utf-8')
+                            print(f"Received sensor data: {message}")
+#                             display_sensor_data(message)
+                    except socket.timeout:
+                        # Timeout occurred, continue to check for new messages
+                        print("No data received within the timeout period. Checking again...")
+                        continue
+
+    except Exception as e:
+        pass
+        print(f"Failed to receive Wi-Fi message: {e}")
+
+# Function to display sensor data on TFT
+def display_sensor_data(message):
+    tft.fill(0xFFFF)  # Clear screen (white background)
+    tft.text(10, 10, "Sensor Data:", color=0x0000)  # Black text
+    tft.text(10, 30, message, color=0x0000)  # Display the message
+    print(f"Displayed sensor data on TFT: {message}")
+
+def receive_via_wifi():
+    audio_file = os.path.join(AUDIO_FOLDER, "received_audio.wav")
+    is_receiving_audio = False
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.bind((WIFI_SERVER_IP, WIFI_SERVER_PORT))
+            server.listen(1)
+            print(f"Listening on {WIFI_SERVER_IP}:{WIFI_SERVER_PORT}...")
+            conn, addr = server.accept()
+            with conn:
+                print(f"Connection established with {addr}")
+                while True:
+                    data = conn.recv(CHUNK_SIZE)
+                    if not data:
+                        break
+                   
+                    if data == b"AUDIO_START":
+                        is_receiving_audio = True
+                        # Ensure a clean slate for a new audio file
+                        open(audio_file, "wb").close()
+                        print("Started receiving audio data.")
+                   
+                    elif data == b"AUDIO_END":
+                        is_receiving_audio = False
+                        print(f"Audio saved to {audio_file}.")
+                   
+                    elif is_receiving_audio and data.startswith(b"AUDIO:"):
+                        with open(audio_file, "ab") as f:
+                            f.write(data[6:])  # Strip "AUDIO:" prefix
+                   
+                    elif data.startswith(b"TEXT:"):
+                        message = data[5:].decode('utf-8')  # Strip "TEXT:" prefix
+                        print(message)
+                        #display_message(message)
+                   
+                    else:
+                        print("Unknown data format received.")
+    except Exception as e:
+        print(f"Error: {e}")
+"""        
+def receive_via_wifi():
+    audio_file = os.path.join(AUDIO_FOLDER, "received_audio.wav")
+    is_receiving_audio = False
+    buffer = b""  # Buffer to accumulate data fragments
+    max_buffer_size = 100 * 1024 * 1024  # Set a max buffer size (100MB for example, adjust as needed)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.bind((WIFI_SERVER_IP, WIFI_SERVER_PORT))
+            server.listen(1)
+            #print(f"Listening on {WIFI_SERVER_IP}:{WIFI_SERVER_PORT}...")
+            print(f"Initialized")
+            conn, addr = server.accept()
+            with conn:
+                print(f"LoRa initialized successfully")
+                while True:
+                    data = conn.recv(CHUNK_SIZE)
+                    if not data:
+                        break
+                   
+                    # Accumulate received data into the buffer
+                    buffer += data
+
+                    # If buffer size exceeds the max limit, prevent it from growing infinitely
+                    if len(buffer) > max_buffer_size:
+                        print("Buffer size exceeded the limit, stopping reception.")
+                        buffer = buffer[:max_buffer_size]
+
+                    while buffer:
+                        # Check if we are receiving audio data
+                        if is_receiving_audio:
+                            # Look for the "AUDIO_COMPLETED" marker anywhere in the buffer
+                            completed_idx = buffer.find(b"AUDIO_COMPLETED")
+                            if completed_idx != -1:
+                                is_receiving_audio = False
+                                print(f"Audio transmission completed.")
+                               
+                                # Write the entire buffer to the file once AUDIO_COMPLETED is received
+                                with open(audio_file, "wb") as f:
+                                    f.write(buffer[:completed_idx])  # Write the audio data, excluding the "AUDIO_COMPLETED"
+                                    print(f"Audio file written with {len(buffer[:completed_idx])} bytes.")
+                               
+                                buffer = buffer[completed_idx + len(b"AUDIO_COMPLETED"):]  # Clear the buffer after writing
+                                   
+                            else:
+                                print(f"Audio is arriving")
+                                break  # Wait for more data if "AUDIO_COMPLETED" is not found
+                       
+                        else:
+                            # Process commands outside audio mode
+                            if buffer.startswith(b"AUDIO_START"):
+                                is_receiving_audio = True
+                                open(audio_file, "wb").close()  # Start a new audio file
+                                buffer = buffer[len(b"AUDIO_START"):]  # Remove "AUDIO_START"
+                                print("Started receiving audio data.")
+                            elif buffer.startswith(b"TEXT:"):
+                                end_idx = buffer.find(b"\n")  # Assume messages are newline-terminated
+                                if end_idx == -1:
+                                    break  # Wait for more data if newline is not found
+                                message = buffer[5:end_idx].decode('utf-8')  # Strip "TEXT:" prefix
+                                print(f"Received message: {message}")
+                                buffer = buffer[end_idx + 1:]  # Remove processed message
+                            #else:
+                             #   print("Unknown data format received.")
+                              #  buffer = b""  # Clear the buffer to avoid stuck state
+
+    except Exception as e:
+        print(f"Error: {e}")
+"""
+# Function to receive audio and save it to a file
+def receive_audio_file(conn):
+    while (data != "completed"):
+        audio_filename = os.path.join(AUDIO_FOLDER, "received_audio.wav")
+        with open(audio_filename, "wb") as f:
+            print(f"Receiving audio file...")
+            while True:
+                chunk = conn.recv(CHUNK_SIZE)
+                if not chunk:
+                    break
+                f.write(chunk)
+            f.close()
+            print(f"Audio file received and saved to {audio_filename}")
+        #play_audio(audio_filename)
+    #except Exception as e:
+        #print(f"Failed to receive audio: {e}")
+"""
+# Function to play the received audio file
+def play_audio(audio_file):
+    try:
+        print(f"Playing audio file: {audio_file}")
+        pygame.mixer.music.load(audio_file)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():  # Wait until the audio finishes playing
+            time.sleep(1)
+    except Exception as e:
+        print(f"Failed to play audio: {e}")
+
+def main():
+    while True:
+        # Receive data via Wi-Fi and process it
+        receive_via_wifi()
+        time.sleep(2)  # Wait for a moment before checking again
+
+if __name__ == "__main__":
+    main()
+
+
